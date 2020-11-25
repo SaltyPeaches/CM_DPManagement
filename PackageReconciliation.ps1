@@ -57,13 +57,11 @@ Function Write-Log {
           [Single]$Severity
           )
     
-    
     #Obtain UTC offset
     $DateTime = New-Object -ComObject WbemScripting.SWbemDateTime 
     $DateTime.SetVarDate($(Get-Date))
     $UtcValue = $DateTime.Value
     $UtcOffset = $UtcValue.Substring(21, $UtcValue.Length - 21)
-    
     
     #Create the line to be logged
     $LogLine =  "<![LOG[$Value]LOG]!>" +`
@@ -77,58 +75,67 @@ Function Write-Log {
     
     #Write the line to the passed log file
     Out-File -InputObject $LogLine -Append -NoClobber -Encoding Default -FilePath $LogFile -WhatIf:$False
+    
 }
 
-Import-Module SqlServer
-
-$logfile = "$PSScriptRoot\PR_$Server.log"
-if(!(Test-Path $logfile)){New-Item -path $logfile -ItemType File -Force | Out-Null}
+$logfile = "$PSSCriptRoot\Logs\PR_$Server.log"
+$MaxLogSize = 2621440
+If(!(Test-Path $logfile)){
+    New-Item -Path $logfile -ItemType File -Force | Out-Null
+} else {
+    if((Get-Item $logfile).length -gt $MaxLogSize){
+        if(Test-Path ($logfile -replace ".log",".lo_")){
+            Remove-Item ($logfile -replace ".log",".lo_") -force | out-null
+        }
+        Move-Item -Force $logfile ($logfile -replace ".log",".lo_")
+    }
+}
 
 $MissingPkgQuery = @"
-SELECT PkgID
-FROM v_ContentDistribution content JOIN
-     vDistributionPoints dp ON content.DPID = dp.DPID
-WHERE dp.ServerName = '$Server' AND PkgID NOT IN (
-    SELECT InsString1
-    FROM v_StatMsgWithInsStrings
-    WHERE MachineName = '$Server' and
-        MessageID = '2384' and
-        Time > DATEADD(day,-1,(
-            SELECT TOP 1 Time
-            FROM v_StatMsgWithInsStrings
-            WHERE MessageID='2386' AND
-                  MachineName = '$Server'
-            ORDER BY Time DESC
-        )
-        )
+select PkgID
+from	v_ContentDistribution content JOIN
+		vDistributionPoints dp ON content.DPID=dp.DPID
+where dp.ServerName = '$Server' AND PkgId NOT IN (
+	select InsString1
+	from v_StatMsgWithInsStrings
+	where MachineName = '$Server' and 
+			MessageID = '2384' and
+			Time > DATEADD(day,-1,(
+				SELECT TOP 1 Time 
+				FROM v_StatMsgWithInsStrings 
+				WHERE MessageID='2386' 
+				AND MachineName='$Server' ORDER BY Time DESC
+			)
+		)
 ) AND PkgID IN (
-    SELECT DISTINCT PkgId
-    FROM vSMS_Content
+	select distinct PkgId
+	from vSMS_Content
 )
+order by PkgID
 "@
 
 Write-Log $logfile "Gathering missing content packages from [$DB]" "ContentReconciliation" 1
-$MissingPkgs = Invoke-SqlCmd -Database $DB -ServerInstance $DBServer -Query $MissingPkgQuery
+[System.Collections.ArrayList]$MissingPkgs = @()
+$MissingPkgs += Invoke-SqlCmd -Database $DB -ServerInstance $DBServer -Query $MissingPkgQuery
 
 if($MissingPkgs){
     $total = $MissingPkgs.count
     $failed = @()
-    Write-Log $logfile "[$total] missing packages were found." "ContentReconciliation" 2
-    Write-Log $logfile "Triggering refresh of missing packages" "ContentReconciliation" 1
+    Write-Log $logfile "[$total] Missing packages were found. Triggering redistribution for missing packages" "ContentReconciliation" 1
 
-    ForEach($pkg in $MissingPkgs){
-        $PackageID = $pkg.PkgID
-        Write-Log $logfile "Processing: $PackageID" "ContentReconciliation" 1
-
+    # Found missing packages. Redistribute them
+    foreach ($pkg in $MissingPkgs) { 
+        $PackageID = $pkg.PkgID 
+        Write-Log "Processing: $PackageID" "ContentReconciliation" 1
+        
         try{
             $pkgquery = "SELECT * FROM SMS_DistributionPoint WHERE ServerNalPath LIKE '%$Server%' AND PackageID = '$PackageID'"
             $DP = Get-WMIObject -Namespace root\sms\site_$SiteCode -Query $pkgquery
-            $DP.RefreshNow = $true
-            $DP.put() | Out-Null
+            $DP.RefreshNow = $true 
+            $DP.put() | out-null
+            write-Log "Successfully triggered refresh of PackageID: $PackageID" "ContentReconciliation" 1
         } catch {
-            Write-Log $logfile "Unable to refresh PackageID: $PackageID" "ContentReconciliation" 3
-            Write-Log $logfile "Error: $($_.Exception.Message)" "ContentReconciliation" 3
-            Write-Log $logfile "$($_.InvocationInfo.PositionMessage)" "ContentReconciliation" 3
+            write-Log "Unable to refresh PackageID: $PackageID" "ContentReconciliation" 3
             $failed += $PackageID
         }
     }

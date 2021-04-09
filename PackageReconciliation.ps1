@@ -126,16 +126,16 @@ if($MissingPkgs){
     # Found missing packages. Redistribute them
     foreach ($pkg in $MissingPkgs) { 
         $PackageID = $pkg.PkgID 
-        Write-Log "Processing: $PackageID" "ContentReconciliation" 1
+        Write-Log $logfile "Processing: $PackageID" "ContentReconciliation" 1
         
         try{
             $pkgquery = "SELECT * FROM SMS_DistributionPoint WHERE ServerNalPath LIKE '%$Server%' AND PackageID = '$PackageID'"
             $DP = Get-WMIObject -Namespace root\sms\site_$SiteCode -Query $pkgquery
             $DP.RefreshNow = $true 
             $DP.put() | out-null
-            write-Log "Successfully triggered refresh of PackageID: $PackageID" "ContentReconciliation" 1
+            write-Log $logfile "Successfully triggered refresh of PackageID: $PackageID" "ContentReconciliation" 1
         } catch {
-            write-Log "Unable to refresh PackageID: $PackageID" "ContentReconciliation" 3
+            write-Log $logfile "Unable to refresh PackageID: $PackageID" "ContentReconciliation" 3
             $failed += $PackageID
         }
     }
